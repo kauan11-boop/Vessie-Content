@@ -370,7 +370,12 @@ const Vessie = (() => {
     load() {
       try {
         const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
-        if (saved && typeof saved === 'object') state.config = { ...state.config, ...saved };
+        if (saved && typeof saved === 'object') {
+          state.config = { ...state.config, ...saved };
+        } else {
+          const existingGoal = Number(Store.data?.goals?.dailyWords);
+          if (Number.isInteger(existingGoal) && existingGoal >= 50) state.config.dailyWordGoal = existingGoal;
+        }
       } catch (error) {
         Logger.warn(`Vessie: configurações não carregadas (${error.message}).`);
       }
@@ -2552,7 +2557,10 @@ const UI = {
     Snap.init();
     this._tick = setInterval(() => { if (!QuillTyper.running) this.detectAll(true); }, 4000);
     this._statusIv = setInterval(() => this._updateStatus(), 3000);
-    document.addEventListener('keydown', this._esc = e => { if (e.key === 'Escape' && !this.minimized) this.setMin(true); }, true);
+    document.addEventListener('keydown', this._esc = e => {
+      if (e.key === 'Escape' && UI.$('.vessie-command-overlay')) return;
+      if (e.key === 'Escape' && !this.minimized) this.setMin(true);
+    }, true);
   },
 
   destroy() {
@@ -2604,6 +2612,14 @@ const UI = {
       .rs-tabs button.rs-on{color:var(--ac2);border-bottom-color:var(--ac2)}
       .rs-tabs button.rs-on.rs-tab-spawn{color:var(--gold);border-bottom-color:var(--gold)}
       .rs-tabs button.rs-on.rs-tab-auto{color:var(--ok);border-bottom-color:var(--ok)}
+      .rs-tabs button.rs-on.rs-tab-ia{color:var(--gold);border-bottom-color:var(--gold)}
+      .rs-app{transition:width .25s ease,height .25s ease,left .25s ease,top .25s ease}
+      .rs-app.rs-full{left:0!important;top:0!important;width:100vw!important;max-width:100vw!important;height:100vh!important;max-height:100vh!important;height:100dvh!important;max-height:100dvh!important;border-radius:0!important;box-shadow:none!important}
+      .rs-app.rs-full .rs-body{padding:14px 16px}
+      .rs-app.rs-full textarea.rs-editor{min-height:38vh;font-size:13.5px}
+      .rs-app.rs-nomenu .rs-tabs{display:none!important}
+      .rs-out{white-space:pre-wrap;background:var(--panel2);border:1px solid var(--bd);border-radius:8px;padding:8px;max-height:220px;overflow:auto;font-size:12px}
+      .rs-out[data-err="1"]{border-color:var(--err)}
       .rs-tabs button.rs-on.rs-tab-redacao{color:var(--accent);border-bottom-color:var(--accent)}
       .rs-body{padding:10px 12px;overflow-y:auto;flex:1}
       .rs-pane{display:none;flex-direction:column;gap:8px}
@@ -2737,6 +2753,7 @@ const UI = {
           <span>🎮✍️</span>
           <span class="rs-title">STUDIO ULTIMATE</span>
           <span class="rs-badge">v6.0</span>
+          <button data-act="full" title="Tela cheia (F)">⛶</button>
           <button data-act="theme" title="Tema">🌓</button>
           <button data-act="min" title="Minimizar (Esc)">─</button>
           <button data-act="close" title="Fechar">✕</button>
@@ -2747,6 +2764,7 @@ const UI = {
           <button data-tab="platform" title="Plataforma">🔬</button>
           <button data-tab="drafts" title="Salvos">💾</button>
           <button data-tab="focus" title="Foco">⏱</button>
+          <button data-tab="ia" class="rs-tab-ia" title="IA — melhorar e criar texto">🤖</button>
           <button data-tab="matific" class="rs-tab-matific" title="Matific">⚡</button>
           <button data-tab="spawn" class="rs-tab-spawn" title="Spawn Finish">🌌</button>
           <button data-tab="auto" class="rs-tab-auto" title="Auto-complete">🚀</button>
@@ -2781,6 +2799,7 @@ const UI = {
               <button class="rs-btn" data-act="paste">📋 Colar da área</button>
               <button class="rs-btn" data-act="pull">⬆️ Puxar do editor</button>
               <button class="rs-btn" data-act="saveDraft">💾 Salvar rascunho</button>
+              <button class="rs-btn" data-act="ia-melhorar">🤖 Melhorar (IA)</button>
               <button class="rs-btn rs-danger" data-act="clear">🧹 Limpar editor</button>
             </div>
           </div>
@@ -2829,6 +2848,31 @@ const UI = {
               <div class="rs-warn" data-show="focusTotal">Total: 0 min</div>
             </div>
             <div class="rs-list" data-list="sessions"></div>
+          </div>
+
+          <!-- ══ IA ══ -->
+          <div class="rs-pane" data-pane="ia">
+            <div class="rs-row" style="justify-content:space-between">
+              <div class="rs-section-title">🤖 Assistente de IA</div>
+              <span class="rs-badge-sm" data-ia-status>LM Studio: …</span>
+            </div>
+            <div class="rs-set"><label>💬 Pedido<small>O texto do editor é enviado junto (vazio = só o editor)</small></label></div>
+            <textarea class="rs-input" data-ia-prompt style="min-height:56px" placeholder="Ex.: crie uma tese sobre desigualdade…"></textarea>
+            <div class="rs-actions">
+              <button class="rs-btn" data-act="ia-melhorar">✨ Melhorar</button>
+              <button class="rs-btn" data-act="ia-continuar">➡️ Continuar</button>
+              <button class="rs-btn" data-act="ia-tese">💡 Tese</button>
+              <button class="rs-btn" data-act="ia-argumentos">🧩 Argumentos</button>
+              <button class="rs-btn" data-act="ia-intervencao">🛠️ Intervenção</button>
+              <button class="rs-btn" data-act="ia-gramatica">📝 Gramática</button>
+              <button class="rs-btn" data-act="ia-feedback">📊 Feedback ENEM</button>
+              <button class="rs-btn" data-act="ia-grade">🎯 Estimar nota</button>
+            </div>
+            <div class="rs-out" data-ia-out data-err="0">Abra a aba 🤖 e rode um comando.</div>
+            <div class="rs-grid-2">
+              <button class="rs-btn rs-primary" data-act="ia-insert">⬇ Inserir no editor</button>
+              <button class="rs-btn" data-act="ia-clear">🧹 Limpar saída</button>
+            </div>
           </div>
 
           <!-- ══ GAME MODE ══ -->
@@ -3216,6 +3260,7 @@ const UI = {
     if (t === 'drafts') this.renderDrafts();
     if (t === 'analyze') this.renderAnalyze();
     if (t === 'focus') this.renderFocus();
+    if (t === 'ia') this.renderIaStatus();
     if (t === 'spawn') this._refreshSpawnUI();
     if (t === 'auto') this._refreshAutoUI();
   },
@@ -3550,6 +3595,47 @@ const UI = {
     r.readAsText(file);
   },
 
+  /* ── IA (LM Studio) ── */
+  iaSay(msg, err) {
+    const o = this.$('[data-ia-out]');
+    if (o) { o.textContent = String(msg ?? ''); o.dataset.err = err ? '1' : '0'; }
+  },
+  iaBusy(b) { this.$$('[data-pane="ia"] button').forEach(x => { try { x.disabled = !!b; } catch {} }); },
+  async renderIaStatus() {
+    const el = this.$('[data-ia-status]');
+    if (!el) return;
+    if (typeof LmClient === 'undefined') { el.textContent = 'LM: extensão ausente'; return; }
+    el.textContent = 'LM: verificando…';
+    try {
+      const s = await LmClient.status();
+      el.textContent = s.ok ? `LM: online (${s.models.length})` : 'LM: offline';
+    } catch { el.textContent = 'LM: erro'; }
+  },
+  async iaCmd(id) {
+    if (typeof LmRunner === 'undefined') { this.setTab('ia'); this.iaSay('Extensão LM não carregada.', true); return; }
+    const prompt = (this.$('[data-ia-prompt]')?.value || '').trim();
+    const src = prompt || this.$('.rs-editor').value;
+    if (!src.trim()) { Logger.info('Escreva no editor ou no pedido da IA.'); return; }
+    this.setTab('ia');
+    this.iaBusy(true); this.iaSay('⏳ Consultando o LM Studio…');
+    try {
+      const r = await LmRunner.run(id, src, {});
+      this.iaSay(r.ok ? r.text : ('Falhou: ' + (r.err || '?') + (r.hint ? '\n' + r.hint : '')), !r.ok);
+      if (r.ok) Logger.ok('🤖 Resposta pronta na aba IA.');
+    } finally { this.iaBusy(false); }
+  },
+  async iaFeedback(kind) {
+    if (typeof RedacaoAI === 'undefined') { this.setTab('ia'); this.iaSay('Extensão LM não carregada.', true); return; }
+    const src = this.$('.rs-editor').value;
+    if (!src.trim()) { Logger.info('Editor vazio.'); return; }
+    this.setTab('ia');
+    this.iaBusy(true); this.iaSay('⏳ Consultando o LM Studio…');
+    try {
+      const r = kind === 'grade' ? await RedacaoAI.gradeEssay(src, {}) : await RedacaoAI.feedback(src, {});
+      this.iaSay(r.ok ? (r.text + (r.parsedTotal != null ? `\n\nEstimativa somada: ${r.parsedTotal}` : '')) : ('Falhou: ' + (r.err || '?') + (r.hint ? '\n' + r.hint : '')), !r.ok);
+    } finally { this.iaBusy(false); }
+  },
+
   /* ── MASTER ACTION DISPATCHER ── */
   async action(name, btn, args = []) {
     switch (name) {
@@ -3570,6 +3656,34 @@ const UI = {
       case 'insertConn': { const v = this.$('[data-conn]').value; if (!v) { Logger.info('Escolha um conectivo.'); break; } this.insertStudio(v + ', '); this.autosave(); break; }
       case 'focus': Focus.toggle(); break;
       case 'focusReset': Focus.reset(); break;
+      case 'full': {
+        try {
+          if (typeof FullscreenUI !== 'undefined') FullscreenUI.toggleFull();
+          else this.$('.rs-app').classList.toggle('rs-full');
+        } catch (e) { Logger.err(e.message); }
+        break;
+      }
+      case 'ia-melhorar': this.iaCmd('melhorar'); break;
+      case 'ia-continuar': this.iaCmd('continuar'); break;
+      case 'ia-tese': this.iaCmd('tese'); break;
+      case 'ia-argumentos': this.iaCmd('argumentos'); break;
+      case 'ia-intervencao': this.iaCmd('intervencao'); break;
+      case 'ia-gramatica': this.iaCmd('gramatica'); break;
+      case 'ia-feedback': this.iaFeedback('feedback'); break;
+      case 'ia-grade': this.iaFeedback('grade'); break;
+      case 'ia-insert': {
+        const o = this.$('[data-ia-out]')?.textContent || '';
+        if (!o || /^(⏳|Falhou|Abra a aba|Saída limpa|Extensão)/.test(o)) { Logger.info('Nada para inserir.'); break; }
+        this.insertStudio(o); Logger.ok('⬇ Resposta da IA no editor.');
+        break;
+      }
+      case 'ia-clear': {
+        const o = this.$('[data-ia-out]');
+        if (o) { o.textContent = 'Saída limpa.'; o.dataset.err = '0'; }
+        const p = this.$('[data-ia-prompt]');
+        if (p) p.value = '';
+        break;
+      }
       case 'clear':
         if (await modal({ title: 'Limpar o editor da página?', okText: 'Limpar', danger: true })) { QuillBridge.replaceAll(''); Logger.ok('🧹 Editor limpo.'); } break;
       case 'export': Utils.download('studio-backup.json', JSON.stringify(Store.data, null, 2)); Logger.ok('⬇️ Exportado.'); break;
@@ -3847,7 +3961,6 @@ const VessieStudio = {
   mount() {
     if (!UI.root || UI.$('[data-vessie-root]')) return;
     Vessie.load();
-    if (Vessie.state.config.dailyWordGoal) GoalsManager.set({ dailyWords: Vessie.state.config.dailyWordGoal });
     const style = this.el('style');
     style.textContent = `
       .vessie-root{gap:10px}
@@ -4002,7 +4115,7 @@ const VessieStudio = {
     const goal = this.field('Meta diária de palavras', 'daily-goal', String(Vessie.state.config.dailyWordGoal), 'number');
     view.append(goal);
     const controls = this.el('div', 'vessie-actions');
-    controls.append(this.button('Salvar meta', 'save-goal'), this.button('▶ Iniciar foco', 'timer', 'rs-btn rs-primary'), this.button('⬇ Exportar PDF', 'pdf'));
+    controls.append(this.button('Sugerir meta pela semana', 'suggest-goal'), this.button('Salvar meta', 'save-goal'), this.button('▶ Iniciar foco', 'timer', 'rs-btn rs-primary'), this.button('⬇ Exportar PDF', 'pdf'));
     view.append(controls);
     const timer = this.el('div', 'vessie-card', '25:00');
     timer.dataset.vessieTimer = 'true';
@@ -4091,6 +4204,7 @@ const VessieStudio = {
       drill: () => this.pickDrill(),
       intervention: () => this.buildIntervention(),
       'search-library': () => this.searchLibrary(),
+      'suggest-goal': () => this.suggestGoal(),
       'save-goal': () => this.saveGoal(),
       timer: () => this.toggleTimer(),
       pdf: () => this.exportPdf(),
@@ -4335,6 +4449,15 @@ const VessieStudio = {
     this.refreshProductivity();
   },
 
+  suggestGoal() {
+    const suggestion = GoalWizard.suggest();
+    const field = UI.$('[data-vessie-field="daily-goal"]');
+    if (field) field.value = String(suggestion.suggestedDailyWords);
+    const stats = UI.$('[data-vessie-stats]');
+    if (stats) stats.prepend(this.el('p', 'vessie-note', `Sugestão baseada na semana: ${suggestion.suggestedDailyWords} palavras/dia. ${suggestion.hint}`));
+    return suggestion;
+  },
+
   toggleTimer() {
     if (FocusTimer.running) {
       const result = FocusTimer.stop(true);
@@ -4442,6 +4565,14 @@ const VessieStudio = {
     const source = UI.$('[data-vessie-field="program"]')?.value || '';
     const config = Vessie.parseProgram(source);
     if (config.dailyWordGoal) GoalsManager.set({ dailyWords: config.dailyWordGoal });
+    const goal = UI.$('[data-vessie-field="daily-goal"]');
+    if (goal) goal.value = String(config.dailyWordGoal);
+    const endpoint = UI.$('[data-vessie-field="lm-endpoint"]');
+    if (endpoint) endpoint.value = config.lmEndpoint;
+    const model = UI.$('[data-vessie-field="lm-model"]');
+    if (model) model.value = config.lmModel;
+    const theme = UI.$('[data-vessie-field="theme"]');
+    if (theme) theme.value = config.theme;
     this.applyTheme();
     const status = UI.$('[data-vessie-config-status]');
     if (status) status.textContent = 'Programa aplicado e salvo localmente. Nenhum comando JavaScript foi executado.';
@@ -4473,7 +4604,10 @@ const VessieStudio = {
       list.replaceChildren();
       for (const command of this._commands.filter(item => item.label.toLocaleLowerCase('pt-BR').includes(query))) {
         const button = this.button(command.label, '');
-        button.onclick = () => { overlay.remove(); command.run(); };
+        button.onclick = () => {
+          overlay.remove();
+          Promise.resolve(command.run()).catch(error => this.showError(error));
+        };
         list.appendChild(button);
       }
     };
@@ -4514,6 +4648,7 @@ const VessieStudio = {
   destroy() {
     clearTimeout(this._analysisTimer);
     clearInterval(this._timerIv);
+    if (FocusTimer.running) FocusTimer.stop(true);
     if (this._keyHandler) document.removeEventListener('keydown', this._keyHandler, true);
     if (this._unsubscribe) this._unsubscribe();
   }
