@@ -2559,6 +2559,12 @@ const UI = {
     this._statusIv = setInterval(() => this._updateStatus(), 3000);
     document.addEventListener('keydown', this._esc = e => {
       if (e.key === 'Escape' && UI.$('.vessie-command-overlay')) return;
+      if (e.key === 'Escape' && UI.$('[data-vessie-desktop]')?.classList.contains('rs-on')) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        VessieDesktop.exit();
+        return;
+      }
       if (e.key === 'Escape' && !this.minimized) this.setMin(true);
     }, true);
   },
@@ -2571,6 +2577,7 @@ const UI = {
     } catch {}
     if (Focus.running) Focus.stop(false);
     try { VessieStudio.destroy(); } catch (e) { Logger.warn(`Vessie: limpeza incompleta (${e.message}).`); }
+    try { VessieDesktop.destroy(); } catch (e) { Logger.warn(`Desktop: limpeza incompleta (${e.message}).`); }
     clearInterval(this._tick); clearInterval(this._statusIv);
     document.removeEventListener('keydown', this._esc, true);
     this.host?.remove();
@@ -4708,6 +4715,607 @@ const VessieReport = {
   }
 };
 
+const VessieLanguage = {
+  tokenize(source) {
+    const tokens = [];
+    let index = 0;
+    while (index < source.length) {
+      const rest = source.slice(index);
+      if (/^\s/u.test(rest)) {
+        index++;
+        continue;
+      }
+      if (rest[0] === '#') break;
+      const string = rest.match(/^"(?:\\.|[^"\\])*"/u);
+      if (string) {
+        let value;
+        try {
+          value = JSON.parse(string[0]);
+        } catch {
+          throw new Error(`Texto inválido na coluna ${index + 1}.`);
+        }
+        tokens.push({ type: 'value', value });
+        index += string[0].length;
+        continue;
+      }
+      const number = rest.match(/^(?:\d+\.?\d*|\.\d+)/u);
+      if (number) {
+        tokens.push({ type: 'value', value: Number(number[0]) });
+        index += number[0].length;
+        continue;
+      }
+      const identifier = rest.match(/^[A-Za-z_][A-Za-z0-9_]*/u);
+      if (identifier) {
+        tokens.push({ type: 'identifier', value: identifier[0] });
+        index += identifier[0].length;
+        continue;
+      }
+      if ('=+-*/()'.includes(rest[0])) {
+        tokens.push({ type: rest[0], value: rest[0] });
+        index++;
+        continue;
+      }
+      throw new Error(`Símbolo não reconhecido na coluna ${index + 1}.`);
+    }
+    return tokens;
+  },
+
+  evaluate(tokens, variables, lineNumber) {
+    let position = 0;
+    const fail = message => { throw new Error(`Linha ${lineNumber}: ${message}`); };
+    const peek = () => tokens[position];
+    const take = type => {
+      if (peek()?.type !== type) return null;
+      return tokens[position++];
+    };
+    const expression = () => addition();
+    const addition = () => {
+      let left = multiplication();
+      while (peek()?.type === '+' || peek()?.type === '-') {
+        const operator = tokens[position++].type;
+        const right = multiplication();
+        if (operator === '+' && (typeof left === 'string' || typeof right === 'string')) {
+          left = String(left) + String(right);
+        } else {
+          if (typeof left !== 'number' || typeof right !== 'number') fail('Use números nesta operação.');
+          left = operator === '+' ? left + right : left - right;
+        }
+      }
+      return left;
+    };
+    const multiplication = () => {
+      let left = unary();
+      while (peek()?.type === '*' || peek()?.type === '/') {
+        const operator = tokens[position++].type;
+        const right = unary();
+        if (typeof left !== 'number' || typeof right !== 'number') fail('Use números nesta operação.');
+        if (operator === '/' && right === 0) fail('Divisão por zero.');
+        left = operator === '*' ? left * right : left / right;
+      }
+      return left;
+    };
+    const unary = () => {
+      if (take('-')) {
+        const value = unary();
+        if (typeof value !== 'number') fail('O sinal negativo só pode ser usado com números.');
+        return -value;
+      }
+      return primary();
+    };
+    const primary = () => {
+      const value = take('value');
+      if (value) return value.value;
+      const identifier = take('identifier');
+      if (identifier) {
+        if (!Object.hasOwn(variables, identifier.value)) fail(`Variável "${identifier.value}" não definida.`);
+        return variables[identifier.value];
+      }
+      if (take('(')) {
+        const result = expression();
+        if (!take(')')) fail('Faltou fechar os parênteses.');
+        return result;
+      }
+      fail('Expressão incompleta.');
+    };
+
+    const result = expression();
+    if (position !== tokens.length) fail('Há conteúdo inesperado após a expressão.');
+    if (typeof result === 'number' && !Number.isFinite(result)) fail('O resultado não é finito.');
+    return result;
+  },
+
+  run(source) {
+    if (typeof source !== 'string' || source.length > 20000) {
+      throw new Error('O programa deve ter até 20.000 caracteres.');
+    }
+    const lines = source.split(/\r?\n/u);
+    if (lines.length > 300) throw new Error('O programa deve ter até 300 linhas.');
+    const variables = Object.create(null);
+    const output = [];
+    let steps = 0;
+
+    for (let index = 0; index < lines.length; index++) {
+      const text = lines[index].trim();
+      if (!text || text.startsWith('#')) continue;
+      steps++;
+      if (steps > 300) throw new Error('Limite de instruções atingido.');
+      const tokens = this.tokenize(text);
+      const command = tokens.shift();
+      if (command?.type !== 'identifier') throw new Error(`Linha ${index + 1}: esperado "let" ou "print".`);
+      if (command.value === 'let') {
+        const name = tokens.shift();
+        if (name?.type !== 'identifier' || name.value === 'let' || name.value === 'print') {
+          throw new Error(`Linha ${index + 1}: nome de variável inválido.`);
+        }
+        if (tokens.shift()?.type !== '=') throw new Error(`Linha ${index + 1}: esperado "=".`);
+        if (Object.keys(variables).length >= 100 && !Object.hasOwn(variables, name.value)) {
+          throw new Error('Limite de 100 variáveis atingido.');
+        }
+        variables[name.value] = this.evaluate(tokens, variables, index + 1);
+      } else if (command.value === 'print') {
+        if (!tokens.length) throw new Error(`Linha ${index + 1}: informe um valor para imprimir.`);
+        output.push(String(this.evaluate(tokens, variables, index + 1)));
+        if (output.length > 100) throw new Error('Limite de 100 saídas atingido.');
+      } else {
+        throw new Error(`Linha ${index + 1}: comando "${command.value}" desconhecido.`);
+      }
+    }
+    return { output, variables: { ...variables }, steps };
+  }
+};
+
+const VessieDesktop = {
+  pane: null,
+  shell: null,
+  windows: new Map(),
+  fileSystem: null,
+  nextZ: 20,
+  wasFull: false,
+  startOpen: false,
+  clockInterval: null,
+  abortController: null,
+
+  mount() {
+    if (!UI.root || UI.$('[data-vessie-desktop]')) return;
+    const style = document.createElement('style');
+    style.textContent = `
+      .rs-app.rs-desktop-mode{position:fixed!important;inset:0!important;left:0!important;top:0!important;width:100vw!important;max-width:100vw!important;height:100vh!important;max-height:100vh!important;height:100dvh!important;max-height:100dvh!important;border:0!important;border-radius:0!important;box-shadow:none!important;z-index:2147483646!important}
+      .rs-app.rs-desktop-mode>.rs-prog,.rs-app.rs-desktop-mode>.rs-head,.rs-app.rs-desktop-mode>.rs-tabs{display:none!important}
+      .rs-app.rs-desktop-mode>.rs-body{display:flex!important;overflow:hidden!important;padding:0!important;min-height:0!important}
+      .rs-desktop-pane{flex:1!important;min-height:0!important;width:100%;height:100%;gap:0!important}
+      .vessie-desktop{--desk-blue:#0879c9;--desk-accent:#27a4f5;--desk-ink:#f7fbff;--desk-muted:#c6deef;position:relative;isolation:isolate;display:flex;flex:1;min-height:0;flex-direction:column;overflow:hidden;color:var(--desk-ink);font:14px/1.4 'Segoe UI',system-ui,sans-serif;background:radial-gradient(ellipse at 69% 43%,#22a4ed 0,#0878c9 26%,#064887 59%,#031c48 100%)}
+      .vessie-desktop *{box-sizing:border-box}
+      .vessie-desktop button{font:inherit;color:inherit}
+      .vessie-desktop-wallpaper{position:absolute;inset:0;z-index:-1;overflow:hidden;background:linear-gradient(120deg,rgba(3,18,53,.22),transparent 63%)}
+      .vessie-desktop-wallpaper:before,.vessie-desktop-wallpaper:after{content:"";position:absolute;right:-12%;top:7%;width:min(72vw,920px);height:min(84vh,780px);border:2px solid rgba(137,216,255,.46);transform:perspective(900px) rotateY(-29deg) rotateZ(-2deg);box-shadow:inset 0 0 120px rgba(45,179,255,.24),0 0 90px rgba(48,173,255,.25)}
+      .vessie-desktop-wallpaper:after{right:8%;top:17%;width:min(42vw,520px);height:min(65vh,600px);border-color:rgba(180,235,255,.32);box-shadow:inset 0 0 90px rgba(45,179,255,.2)}
+      .vessie-desktop-icons{position:absolute;left:12px;top:12px;bottom:60px;display:flex;flex-direction:column;align-items:flex-start;gap:7px;flex-wrap:wrap;align-content:flex-start}
+      .vessie-desktop-icon{width:86px;min-height:76px;padding:6px 3px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;border:1px solid transparent;border-radius:3px;background:transparent;text-align:center;font-size:12px;cursor:pointer;text-shadow:0 1px 3px #00152b}
+      .vessie-desktop-icon:hover,.vessie-desktop-icon:focus-visible{outline:none;background:rgba(185,225,255,.2);border-color:rgba(220,242,255,.28)}
+      .vessie-desktop-icon i{font-style:normal;font-size:30px;line-height:1.1}
+      .vessie-window{position:absolute;z-index:2;left:clamp(10px,calc(50% - 390px),35vw);top:clamp(10px,7vh,58px);display:flex;flex-direction:column;width:min(780px,calc(100% - 24px));height:min(610px,calc(100% - 68px));min-width:min(320px,calc(100% - 16px));min-height:230px;resize:both;overflow:hidden;background:#f3f6f9;color:#18232e;border:1px solid #d8e1ea;border-radius:5px;box-shadow:0 18px 52px #00142d80}
+      .vessie-window[hidden]{display:none}
+      .vessie-window.is-maximized{left:8px!important;top:8px!important;width:calc(100% - 16px)!important;height:calc(100% - 62px)!important;resize:none}
+      .vessie-window-titlebar{height:40px;min-height:40px;display:flex;align-items:center;gap:10px;padding:0 7px 0 13px;background:#f8fafc;user-select:none;touch-action:none}
+      .vessie-window-title{flex:1;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .vessie-window-action{width:37px;height:32px;border:0;border-radius:3px;background:transparent;color:#34495c!important;cursor:pointer}
+      .vessie-window-action:hover{background:#e5edf5}.vessie-window-action[data-window-action="close"]:hover{background:#d83943;color:#fff!important}
+      .vessie-window-content{display:flex;flex:1;min-height:0;flex-direction:column;padding:12px;gap:9px;overflow:auto}
+      .vessie-window-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:7px}
+      .vessie-window-toolbar button,.vessie-window-toolbar select{min-height:32px;padding:5px 10px;border:1px solid #c7d5e1;border-radius:3px;background:#fff;color:#203040;cursor:pointer}
+      .vessie-window-toolbar button:hover{border-color:#329add;background:#f0f8ff}
+      .vessie-code-editor,.vessie-terminal-input{width:100%;border:1px solid #b6c8d7;border-radius:3px;background:#111a26;color:#e8f0f7;font:13px/1.55 Consolas,'Courier New',monospace;outline:none}
+      .vessie-code-editor{flex:1;min-height:150px;resize:none;padding:12px;tab-size:2}
+      .vessie-code-editor:focus,.vessie-terminal-input:focus{border-color:#168bd2;box-shadow:0 0 0 2px #168bd233}
+      .vessie-window-hint{color:#506579;font-size:12px}
+      .vessie-code-output{min-height:74px;max-height:27%;overflow:auto;padding:8px 10px;border:1px solid #cad7e0;border-radius:3px;background:#fff;color:#17314a;font:12px/1.5 Consolas,'Courier New',monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+      .vessie-code-output[data-error="true"]{color:#a42028;border-color:#e99ca0}
+      .vessie-os-console{flex:1;min-height:120px;overflow:auto;padding:10px;border-radius:3px;background:#101a23;color:#b8edbd;font:12px/1.55 Consolas,'Courier New',monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+      .vessie-terminal-input{padding:9px 10px}
+      .vessie-desktop-taskbar{position:relative;z-index:10;display:flex;align-items:center;gap:4px;min-height:48px;padding:4px 8px calc(4px + env(safe-area-inset-bottom,0px));background:rgba(12,22,34,.88);backdrop-filter:blur(16px);border-top:1px solid rgba(255,255,255,.2)}
+      .vessie-taskbar-button{height:38px;min-width:42px;padding:0 10px;display:flex;align-items:center;justify-content:center;gap:8px;border:0;border-radius:3px;background:transparent;cursor:pointer}
+      .vessie-taskbar-button:hover,.vessie-taskbar-button.is-active{background:rgba(210,235,255,.2)}
+      .vessie-taskbar-button.is-active:after{content:"";position:absolute;bottom:1px;width:22px;height:2px;background:#48b7ff}
+      .vessie-start-button{font-size:21px}
+      .vessie-taskbar-apps{display:flex;flex:1;gap:3px;min-width:0}
+      .vessie-taskbar-app{position:relative;font-size:18px}
+      .vessie-taskbar-clock{padding:0 9px;text-align:center;font-size:11px;line-height:1.35;white-space:nowrap}
+      .vessie-start-menu{position:absolute;z-index:12;left:0;bottom:calc(48px + env(safe-area-inset-bottom,0px));width:min(360px,calc(100vw - 16px));padding:12px;background:rgba(17,34,51,.97);border:1px solid #ffffff30;box-shadow:0 12px 38px #00152b99;backdrop-filter:blur(18px)}
+      .vessie-start-menu[hidden]{display:none}
+      .vessie-start-menu h2{margin:0 0 9px;font-size:14px;font-weight:600}
+      .vessie-start-apps{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+      .vessie-start-app{min-height:68px;padding:9px;border:1px solid #ffffff20;background:#ffffff0c;text-align:left;cursor:pointer}
+      .vessie-start-app:hover{background:#168bd266;border-color:#8bd0ff}
+      .vessie-start-app i{display:block;margin-bottom:5px;font-style:normal;font-size:23px}
+      .vessie-desktop-exit{font-size:12px}
+      @media(max-width:640px){
+        .vessie-desktop-icons{left:6px;top:6px;gap:3px}
+        .vessie-desktop-icon{width:72px;min-height:66px;font-size:11px}
+        .vessie-desktop-icon i{font-size:26px}
+        .vessie-window{left:6px!important;top:6px!important;width:calc(100% - 12px)!important;height:calc(100% - 62px)!important;min-width:0;min-height:0;resize:none}
+        .vessie-window-content{padding:9px}
+        .vessie-taskbar-button{min-width:38px;padding:0 7px}
+        .vessie-desktop-exit{font-size:0}.vessie-desktop-exit:after{content:"Sair";font-size:11px}
+      }
+      @media(max-height:480px){.vessie-window{top:4px!important;height:calc(100% - 56px)!important}.vessie-desktop-icon{min-height:58px}.vessie-desktop-taskbar{min-height:42px}}
+    `;
+    UI.root.appendChild(style);
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.dataset.tab = 'desktop';
+    tab.title = 'Desktop Vessie';
+    tab.setAttribute('aria-label', 'Abrir desktop Vessie');
+    tab.textContent = '🖥️';
+    tab.addEventListener('click', () => this.open());
+    UI.$('.rs-tabs').appendChild(tab);
+
+    this.pane = document.createElement('div');
+    this.pane.className = 'rs-pane rs-desktop-pane';
+    this.pane.dataset.pane = 'desktop';
+    this.pane.dataset.vessieDesktop = 'true';
+    this.pane.innerHTML = `
+      <main class="vessie-desktop" aria-label="Desktop Vessie">
+        <div class="vessie-desktop-wallpaper" aria-hidden="true"></div>
+        <div class="vessie-desktop-icons">
+          <button class="vessie-desktop-icon" data-open-app="code"><i>🧑‍💻</i><span>VessieScript</span></button>
+          <button class="vessie-desktop-icon" data-open-app="os"><i>💻</i><span>VessieOS</span></button>
+          <button class="vessie-desktop-icon" data-open-app="writing"><i>📝</i><span>Escrita</span></button>
+          <button class="vessie-desktop-icon" data-open-app="games"><i>🎮</i><span>Jogos</span></button>
+        </div>
+        <div class="vessie-start-menu" data-start-menu hidden>
+          <h2>Iniciar · Vessie Studio</h2>
+          <div class="vessie-start-apps">
+            <button class="vessie-start-app" data-open-app="code"><i>🧑‍💻</i>VessieScript</button>
+            <button class="vessie-start-app" data-open-app="os"><i>💻</i>Terminal VessieOS</button>
+            <button class="vessie-start-app" data-open-app="writing"><i>📝</i>Estúdio de escrita</button>
+            <button class="vessie-start-app" data-open-app="games"><i>🎮</i>Modo de jogo</button>
+          </div>
+        </div>
+        <div class="vessie-desktop-taskbar">
+          <button class="vessie-taskbar-button vessie-start-button" type="button" data-desktop-action="start" aria-label="Menu Iniciar" aria-expanded="false">⊞</button>
+          <div class="vessie-taskbar-apps">
+            <button class="vessie-taskbar-button vessie-taskbar-app" type="button" data-open-app="code" aria-label="Abrir VessieScript">🧑‍💻</button>
+            <button class="vessie-taskbar-button vessie-taskbar-app" type="button" data-open-app="os" aria-label="Abrir VessieOS">💻</button>
+          </div>
+          <button class="vessie-taskbar-button vessie-desktop-exit" type="button" data-desktop-action="exit">Voltar ao Studio</button>
+          <time class="vessie-taskbar-clock" data-desktop-clock></time>
+        </div>
+      </main>`;
+    UI.$('.rs-body').appendChild(this.pane);
+    this.shell = this.pane.querySelector('.vessie-desktop');
+    this.abortController = new AbortController();
+    const options = { signal: this.abortController.signal };
+    this.shell.addEventListener('click', event => this.onClick(event), options);
+    this.shell.addEventListener('keydown', event => this.onKeydown(event), options);
+    this.clockInterval = setInterval(() => this.updateClock(), 30000);
+    this.updateClock();
+    ModuleRegistry.register('VessieDesktop', this, { kind: 'desktop-environment' });
+  },
+
+  open() {
+    if (!this.pane) return { ok: false, err: 'desktop_not_mounted' };
+    this.wasFull = FullscreenUI.isFull();
+    UI.setTab('desktop');
+    this.pane.classList.add('rs-on');
+    const app = UI.$('.rs-app');
+    app.classList.add('rs-desktop-mode');
+    FullscreenUI.setFull(true);
+    this.startOpen = false;
+    return { ok: true };
+  },
+
+  exit() {
+    const app = UI.$('.rs-app');
+    if (!app?.classList.contains('rs-desktop-mode')) return { ok: false, err: 'desktop_not_open' };
+    this.pane.classList.remove('rs-on');
+    app.classList.remove('rs-desktop-mode');
+    FullscreenUI.setFull(this.wasFull);
+    UI.setTab('editor');
+    this.closeStartMenu();
+    return { ok: true };
+  },
+
+  updateClock() {
+    const clock = this.shell?.querySelector('[data-desktop-clock]');
+    if (clock) {
+      const now = new Date();
+      clock.dateTime = now.toISOString();
+      clock.textContent = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' }).format(now);
+    }
+  },
+
+  closeStartMenu() {
+    const menu = this.shell?.querySelector('[data-start-menu]');
+    const button = this.shell?.querySelector('[data-desktop-action="start"]');
+    if (menu) menu.hidden = true;
+    if (button) button.setAttribute('aria-expanded', 'false');
+    this.startOpen = false;
+  },
+
+  onClick(event) {
+    const open = event.target.closest('[data-open-app]');
+    if (open) {
+      event.preventDefault();
+      this.closeStartMenu();
+      this.launch(open.dataset.openApp);
+      return;
+    }
+    const start = event.target.closest('[data-desktop-action="start"]');
+    if (start) {
+      this.startOpen = !this.startOpen;
+      this.shell.querySelector('[data-start-menu]').hidden = !this.startOpen;
+      start.setAttribute('aria-expanded', String(this.startOpen));
+      return;
+    }
+    const action = event.target.closest('[data-window-action]');
+    const win = action?.closest('.vessie-window');
+    if (action && win) {
+      const operation = action.dataset.windowAction;
+      if (operation === 'close') this.closeWindow(win.dataset.app);
+      else if (operation === 'minimize') win.hidden = true;
+      else if (operation === 'maximize') win.classList.toggle('is-maximized');
+      this.refreshTaskbar();
+      return;
+    }
+    const runCode = event.target.closest('[data-run-code]');
+    if (runCode) this.runCode();
+    const clearCode = event.target.closest('[data-clear-code]');
+    if (clearCode) {
+      const output = this.shell.querySelector('[data-code-output]');
+      output.textContent = 'Saída limpa.';
+      output.dataset.error = 'false';
+    }
+    const terminal = event.target.closest('[data-run-terminal]');
+    if (terminal) this.runTerminalCommand();
+    if (!event.target.closest('.vessie-start-menu') && !start) this.closeStartMenu();
+  },
+
+  onKeydown(event) {
+    if (event.key === 'Enter' && event.target.matches('[data-terminal-input]')) {
+      event.preventDefault();
+      this.runTerminalCommand();
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && event.target.matches('[data-code-editor]')) {
+      event.preventDefault();
+      this.runCode();
+    }
+    if (event.key === 'Escape' && event.target.closest('.vessie-window')) {
+      event.stopPropagation();
+      this.closeStartMenu();
+    }
+  },
+
+  launch(appName) {
+    if (appName === 'writing') {
+      this.exit();
+      UI.setTab('vessie');
+      return { ok: true };
+    }
+    if (appName === 'games') {
+      this.exit();
+      return GameMode.open();
+    }
+    if (!['code', 'os'].includes(appName)) return { ok: false, err: 'unknown_app' };
+    let win = this.windows.get(appName);
+    if (win) {
+      win.hidden = false;
+      this.focusWindow(win);
+      if (appName === 'os') this.shell.querySelector('[data-terminal-input]')?.focus();
+      return { ok: true };
+    }
+    win = this.createWindow(appName);
+    this.windows.set(appName, win);
+    this.shell.appendChild(win);
+    this.focusWindow(win);
+    if (appName === 'os') this.shell.querySelector('[data-terminal-input]')?.focus();
+    this.refreshTaskbar();
+    return { ok: true };
+  },
+
+  createWindow(appName) {
+    const isCode = appName === 'code';
+    const title = isCode ? 'VessieScript · Editor' : 'VessieOS · Terminal virtual';
+    const icon = isCode ? '🧑‍💻' : '💻';
+    const win = document.createElement('section');
+    win.className = 'vessie-window';
+    win.dataset.app = appName;
+    win.setAttribute('aria-label', title);
+    win.innerHTML = `
+      <header class="vessie-window-titlebar">
+        <span aria-hidden="true">${icon}</span><span class="vessie-window-title">${title}</span>
+        <button class="vessie-window-action" type="button" data-window-action="minimize" aria-label="Minimizar">─</button>
+        <button class="vessie-window-action" type="button" data-window-action="maximize" aria-label="Maximizar">□</button>
+        <button class="vessie-window-action" type="button" data-window-action="close" aria-label="Fechar">×</button>
+      </header>
+      ${isCode ? `
+        <div class="vessie-window-content">
+          <div class="vessie-window-toolbar">
+            <button type="button" data-run-code>▶ Executar</button>
+            <button type="button" data-clear-code>Limpar saída</button>
+            <span class="vessie-window-hint">Ctrl+Enter para executar · VessieScript 1.0</span>
+          </div>
+          <textarea class="vessie-code-editor" data-code-editor aria-label="Código VessieScript" spellcheck="false"></textarea>
+          <div class="vessie-code-output" data-code-output aria-live="polite">A saída do programa aparece aqui.</div>
+        </div>` : `
+        <div class="vessie-window-content">
+          <div class="vessie-window-hint">Terminal isolado · arquivos somente na memória desta sessão</div>
+          <pre class="vessie-os-console" data-os-console aria-live="polite"></pre>
+          <input class="vessie-terminal-input" data-terminal-input aria-label="Comando do terminal" autocomplete="off" spellcheck="false" placeholder="Digite help e pressione Enter"/>
+        </div>`}`;
+    const titlebar = win.querySelector('.vessie-window-titlebar');
+    titlebar.addEventListener('pointerdown', event => this.startDrag(event, win));
+    win.addEventListener('pointerdown', () => this.focusWindow(win));
+    if (isCode) {
+      win.querySelector('[data-code-editor]').value = [
+        '# VessieScript: variáveis, texto e contas sem executar JavaScript.',
+        'let nome = "mundo"',
+        'let total = 6 * (4 + 2)',
+        'print "Olá, " + nome + "!"',
+        'print "O resultado é " + total'
+      ].join('\n');
+    } else {
+      this.fileSystem = this.fileSystem || new Map([
+        ['README.txt', 'VessieOS é uma simulação educacional. Nenhum comando acessa o sistema operacional real.'],
+        ['notas.txt', 'Seus arquivos virtuais existem somente nesta sessão do navegador.']
+      ]);
+      this.directories = this.directories || new Set(['documentos']);
+      this.appendTerminal('VessieOS 1.0 · ambiente virtual iniciado.');
+      this.appendTerminal('Digite help para ver os comandos disponíveis.');
+    }
+    return win;
+  },
+
+  startDrag(event, win) {
+    if (event.button !== 0 || event.target.closest('button') || win.classList.contains('is-maximized')) return;
+    event.preventDefault();
+    const rect = win.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const originX = rect.left;
+    const originY = rect.top;
+    const move = moveEvent => {
+      const maxX = Math.max(0, innerWidth - Math.min(160, rect.width));
+      const maxY = Math.max(0, innerHeight - Math.min(80, rect.height));
+      win.style.left = `${Math.min(maxX, Math.max(0, originX + moveEvent.clientX - startX))}px`;
+      win.style.top = `${Math.min(maxY, Math.max(0, originY + moveEvent.clientY - startY))}px`;
+    };
+    const stop = () => {
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', stop);
+    };
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', stop, { once: true });
+  },
+
+  focusWindow(win) {
+    win.style.zIndex = String(++this.nextZ);
+    this.windows.forEach(item => item.classList.toggle('is-focused', item === win));
+    this.refreshTaskbar();
+  },
+
+  closeWindow(appName) {
+    const win = this.windows.get(appName);
+    if (!win) return;
+    win.remove();
+    this.windows.delete(appName);
+    this.refreshTaskbar();
+  },
+
+  refreshTaskbar() {
+    this.shell?.querySelectorAll('[data-open-app]').forEach(button => {
+      const appName = button.dataset.openApp;
+      const win = this.windows.get(appName);
+      button.classList.toggle('is-active', !!win && !win.hidden);
+    });
+  },
+
+  runCode() {
+    const source = this.shell.querySelector('[data-code-editor]')?.value || '';
+    const output = this.shell.querySelector('[data-code-output]');
+    try {
+      const result = VessieLanguage.run(source);
+      output.textContent = result.output.length ? result.output.join('\n') : 'Programa executado sem saída.';
+      output.dataset.error = 'false';
+    } catch (error) {
+      output.textContent = error.message;
+      output.dataset.error = 'true';
+    }
+  },
+
+  appendTerminal(text) {
+    const consoleArea = this.shell?.querySelector('[data-os-console]');
+    if (!consoleArea) return;
+    consoleArea.textContent += `${consoleArea.textContent ? '\n' : ''}${text}`;
+    consoleArea.scrollTop = consoleArea.scrollHeight;
+  },
+
+  runTerminalCommand() {
+    const input = this.shell.querySelector('[data-terminal-input]');
+    const commandLine = input.value.trim();
+    if (!commandLine) return;
+    input.value = '';
+    this.appendTerminal(`user@vessie:~$ ${commandLine}`);
+    const [command, ...args] = commandLine.split(/\s+/u);
+    const fs = this.fileSystem || new Map();
+    const validName = name => /^[A-Za-z0-9._-]{1,64}$/u.test(name) && name !== '.' && name !== '..';
+    let result = '';
+    switch (command.toLowerCase()) {
+      case 'help':
+      case '?':
+        result = 'help | ls | pwd | date | about | cat <arquivo> | touch <arquivo> | write <arquivo> <texto> | mkdir <pasta> | clear';
+        break;
+      case 'ls':
+        result = [...fs.keys(), ...[...this.directories].map(name => `${name}/`)].join('  ') || '(diretório vazio)';
+        break;
+      case 'pwd':
+        result = '/home/user';
+        break;
+      case 'date':
+        result = new Date().toLocaleString('pt-BR');
+        break;
+      case 'about':
+        result = 'VessieOS é um simulador didático no navegador. Não é um sistema operacional real; não acessa arquivos do computador, rede ou processos do dispositivo.';
+        break;
+      case 'cat': {
+        const filename = args[0];
+        result = filename && fs.has(filename) ? fs.get(filename) : `Arquivo não encontrado: ${filename || '(nome ausente)'}`;
+        break;
+      }
+      case 'touch': {
+        const filename = args[0];
+        if (!filename || !validName(filename)) result = 'Nome inválido. Use letras, números, ponto, hífen ou sublinhado.';
+        else {
+          if (!fs.has(filename)) fs.set(filename, '');
+          result = `Arquivo virtual pronto: ${filename}`;
+        }
+        break;
+      }
+      case 'write': {
+        const filename = args[0];
+        if (!filename || !validName(filename)) result = 'Uso: write <arquivo> <texto>';
+        else if (args.slice(1).join(' ').length > 4000) result = 'O texto do arquivo deve ter até 4.000 caracteres.';
+        else {
+          fs.set(filename, args.slice(1).join(' '));
+          result = `Escrito no arquivo virtual ${filename}.`;
+        }
+        break;
+      }
+      case 'mkdir':
+        if (!args[0] || !validName(args[0])) result = 'Uso: mkdir <nome-simples>';
+        else if (this.directories.has(args[0])) result = `A pasta já existe: ${args[0]}/`;
+        else {
+          this.directories.add(args[0]);
+          result = `Pasta virtual criada: ${args[0]}/`;
+        }
+        break;
+      case 'clear': {
+        const area = this.shell.querySelector('[data-os-console]');
+        area.textContent = '';
+        break;
+      }
+      default:
+        result = `Comando desconhecido: ${command}. Digite help.`;
+    }
+    if (result) this.appendTerminal(result);
+  },
+
+  api() {
+    return {
+      open: () => this.open(),
+      exit: () => this.exit(),
+      launch: appName => this.launch(appName),
+      run: source => VessieLanguage.run(source),
+      apps: () => [...this.windows.keys()]
+    };
+  },
+
+  destroy() {
+    this.abortController?.abort();
+    clearInterval(this.clockInterval);
+    this.windows.clear();
+  }
+};
+
 /* ── LM-00 · Cliente LM Studio (OpenAI-compatible) + config + cache + log ──
    Requer LM Studio com servidor local ativo (ex.: http://localhost:1234/v1).
    Se o navegador recusar (CORS/rede), status() retorna {ok:false} com dica. */
@@ -5653,6 +6261,7 @@ URLCapture.install();
 Spy.install();
 UI.mount();
 VessieStudio.mount();
+VessieDesktop.mount();
 UI._updateFinishBtn();
 
 /* Public APIs */
@@ -5665,6 +6274,7 @@ window.MatificPanel = {
   utils: Utils, store: Store,
   __cleanup: () => UI.destroy()
 };
+window.VessieDesktop = VessieDesktop.api();
 
 window.RedacaoStudio = Object.assign({
   insert: (txt, mode) => {
